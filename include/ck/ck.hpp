@@ -74,6 +74,7 @@
 #define CK_USE_AMD_WMMA
 #endif
 
+// TODO: enable buffer load when found correct 3rd dword
 // buffer load
 #define CK_USE_AMD_BUFFER_LOAD 1
 
