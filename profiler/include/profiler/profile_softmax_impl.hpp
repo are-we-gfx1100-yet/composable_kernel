@@ -90,7 +90,7 @@ bool profile_softmax_impl(int do_verification,
     {
         using ReferenceSoftmax =
             tensor_operation::host::ReferenceSoftmax<InDataType, OutDataType, AccDataType>;
-        ReferenceSoftmax{}.MakeInvoker().Run({in, out_ref, alpha, beta, reduce_dims});
+        ReferenceSoftmax{}.MakeInvoker().Run({in, out_ref, static_cast<float>(alpha), static_cast<float>(beta), reduce_dims});
     }
 
     DeviceMem in_dev(in.GetElementSpaceSizeInBytes());

@@ -1120,6 +1120,7 @@ struct GridwiseBatchedMultiheadAttentionForward_Xdl_CShuffle
             } // end gemm1
 
             // workaround compiler issue; see ck/ck.hpp
+            #define CK_WORKAROUND_SWDEV_XXXXXX_BF16_ATTEN_FWD_GFX908_ISSUE 0
             if constexpr(CK_WORKAROUND_SWDEV_XXXXXX_BF16_ATTEN_FWD_GFX908_ISSUE == 1 &&
                          (is_same_v<FloatGemm, bhalf_t>)&&MPerBlock == 256 && NPerBlock == 128 &&
                          Gemm1NPerBlock == 128)
