@@ -40,7 +40,7 @@ int main()
 
     x.GenerateTensorValue(GeneratorTensor_3<XDataType>{-1.0, 1.0});
     for(int i = 0; i < N; ++i)
-        indices(i) = i;
+        indices(i, 0) = i;
 
     DeviceMem x_device_buf(sizeof(XDataType) * x.mDesc.GetElementSpaceSize());
     DeviceMem y_device_buf(sizeof(YDataType) * y.mDesc.GetElementSpaceSize());
@@ -76,8 +76,8 @@ int main()
 
         for(int i = 0; i < N; ++i)
         {
-            IndexDataType idx = indices(i);
-            y_host(idx)       = x(i);
+            IndexDataType idx = indices(i, 0);
+            y_host(idx, 0)       = x(i, 0);
         }
 
         y_device_buf.FromDevice(y.mData.data());
