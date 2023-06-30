@@ -1041,7 +1041,6 @@ inline __host__ __device__ constexpr half_t type_convert_sp<half_t, int>(int x)
 }
 
 // convert fp32 to bfp16
-#define FLASH_ATTENTION_INTERNAL_USE_RTZ 0
 #if FLASH_ATTENTION_INTERNAL_USE_RTZ
 template <>
 inline __host__ __device__ constexpr bhalf_t type_convert<bhalf_t, float>(float x)
