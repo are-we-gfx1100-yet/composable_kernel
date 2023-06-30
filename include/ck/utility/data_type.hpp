@@ -1041,6 +1041,7 @@ inline __host__ __device__ constexpr half_t type_convert_sp<half_t, int>(int x)
 }
 
 // convert fp32 to bfp16
+#if FLASH_ATTENTION_INTERNAL_USE_RTZ
 template <>
 inline __host__ __device__ constexpr bhalf_t type_convert<bhalf_t, float>(float x)
 {
@@ -1048,72 +1049,13 @@ inline __host__ __device__ constexpr bhalf_t type_convert<bhalf_t, float>(float 
     {
         float fp32;
         uint32_t int32;
-    } u = {x};
+    } u = {static_cast<float>(x)};
 
     return uint16_t(u.int32 >> 16);
 }
-
-// convert bfp16 to fp16 via fp32
+#else
 template <>
-inline __host__ __device__ constexpr half_t type_convert<half_t, bhalf_t>(bhalf_t x)
-{
-    float x_fp32 = type_convert<float>(x);
-
-    return static_cast<half_t>(x_fp32);
-}
-
-// convert fp16 to bfp16 via fp32
-template <>
-inline __host__ __device__ constexpr bhalf_t type_convert<bhalf_t, half_t>(half_t x)
-{
-    float x_fp32 = static_cast<float>(x);
-
-    return type_convert<bhalf_t>(x_fp32);
-}
-
-// convert bfp16 to int32 via fp32
-template <>
-inline __host__ __device__ constexpr int32_t type_convert<int32_t, bhalf_t>(bhalf_t x)
-{
-    float x_fp32 = type_convert<float>(x);
-
-    return static_cast<int32_t>(x_fp32);
-}
-
-// convert int32 to bfp16 via fp32
-template <>
-inline __host__ __device__ constexpr bhalf_t type_convert<bhalf_t, int32_t>(int32_t x)
-{
-    float x_fp32 = static_cast<float>(x);
-
-    return type_convert<bhalf_t>(x_fp32);
-}
-
-// convert bfp16 to int8 via fp32
-template <>
-inline __host__ __device__ constexpr int8_t type_convert<int8_t, bhalf_t>(bhalf_t x)
-{
-    float x_fp32 = type_convert<float>(x);
-
-    return static_cast<int8_t>(x_fp32);
-}
-
-// convert int8 to bfp16 via fp32
-template <>
-inline __host__ __device__ constexpr bhalf_t type_convert<bhalf_t, int8_t>(int8_t x)
-{
-    float x_fp32 = static_cast<float>(x);
-
-    return type_convert<bhalf_t>(x_fp32);
-}
-
-// Declare a template function for bf16 conversion using RTN
-template <typename Y, typename X>
-__host__ __device__ constexpr Y bf16_convert_rtn(X x);
-
-// Convert fp32 to bf16 with RTN if higher precision is needed
-template <>
-inline __host__ __device__ constexpr bhalf_t bf16_convert_rtn<bhalf_t, float>(float x)
+inline __host__ __device__ constexpr bhalf_t type_convert<bhalf_t, float>(float x)
 {
     union
     {
@@ -1153,6 +1095,43 @@ inline __host__ __device__ constexpr bhalf_t bf16_convert_rtn<bhalf_t, float>(fl
     u.int32 |= flag1 ? 0x10000 : 0x0;                      // Preserve signaling NaN
 
     return uint16_t(u.int32 >> 16);
+}
+#endif
+
+// convert fp16 to bf16
+template <>
+inline __host__ __device__ bhalf_t type_convert<bhalf_t, half_t>(half_t x)
+{
+    union
+    {
+        float fp32;
+        uint32_t int32;
+    } u = {static_cast<float>(x)};
+
+    return uint16_t(u.int32 >> 16);
+}
+
+template <>
+inline __host__ __device__ bhalf2_t type_convert<bhalf2_t, half2_t>(half2_t x)
+{
+    float y0{0}, y1{0};
+    bhalf2_t y{0};
+    asm volatile("\n \
+            v_cvt_f32_f16 %0, %1 \n \
+            "
+                 : "=v"(y0)
+                 : "v"(x));
+    asm volatile("\n \
+            v_cvt_f32_f16 %0, %1 src0_sel:WORD_1\n \
+            "
+                 : "=v"(y1)
+                 : "v"(x));
+    asm volatile("\n \
+            v_pack_b32_f16 %0, %1, %2 op_sel:[1, 1] \n \
+            "
+                 : "=v"(y)
+                 : "v"(y0), "v"(y1));
+    return y;
 }
 
 // convert fp16 to bfp16 via fp32 with RTN if higher precision is needed
@@ -1228,3 +1207,13 @@ struct NumericLimits<f8_t>
 };
 
 } // namespace ck
+
+namespace std {
+
+inline std::ostream& operator<<(std::ostream& os, const ck::half_t& p)
+{
+    os << static_cast<float>(p);
+    return os;
+}
+
+} // namespace std

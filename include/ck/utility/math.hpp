@@ -172,6 +172,22 @@ static inline __host__ float exp(float x) { return std::expf(x); }
 
 static inline __host__ double exp(double x) { return std::exp(x); }
 
+// disallow implicit type casting
+template <typename T>
+__device__ T log(T x);
+
+template <>
+__device__ float log<float>(float x)
+{
+    return __logf(x);
+}
+
+template <>
+__device__ double log<double>(double x)
+{
+    return log(x);
+}
+
 // greatest common divisor, aka highest common factor
 __host__ __device__ constexpr index_t gcd(index_t x, index_t y)
 {
