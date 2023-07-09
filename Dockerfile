@@ -1,7 +1,7 @@
 FROM ubuntu:20.04
 ARG DEBIAN_FRONTEND=noninteractive
 ARG ROCMVERSION=5.6
-ARG compiler_version=""
+ARG compiler_version="amd-stg-open"
 ARG compiler_commit=""
 
 RUN set -xe
