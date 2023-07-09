@@ -329,13 +329,13 @@ __global__ void
     // clang-format off
 // ***************************************************
 // Make Tensor Descriptors
-// o	Self-attention(packed QKV): [batchSize, sequenceLength, headCount, 3, headSize]
+// o	Cross-attention(packed KV): [batchSize, sequenceLength, headCount, 2, headSize]
     constexpr index_t array_size = 4;
     std::array<ck::index_t, array_size> q_gs_ms_ks_lengths{batch_size, head_count, q_sequence_length, head_size};
-    std::array<ck::index_t, array_size> q_gs_ms_ks_strides{q_sequence_length * head_count * head_size, head_size, head_count * head_size, 1};
+    std::array<ck::index_t, array_size> q_gs_ms_ks_strides{q_sequence_length * head_count * head_size, q_sequence_length * head_size, head_size, 1};
     
-    std::array<ck::index_t, array_size> k_gs_ms_ks_lengths{batch_size, head_count, kv_sequence_length, head_size};
-    std::array<ck::index_t, array_size> k_gs_ms_ks_strides{kv_sequence_length * head_count * 2 * head_size, 2 * head_size, head_count * 2 * head_size, 1};
+    std::array<ck::index_t, array_size> k_gs_ns_ks_lengths{batch_size, head_count, kv_sequence_length, head_size};
+    std::array<ck::index_t, array_size> k_gs_ns_ks_strides{kv_sequence_length * head_count * 2 * head_size, 2 * head_size, head_count * 2 * head_size, 1};
 
     std::array<ck::index_t, array_size> v_gs_os_ns_lengths{batch_size, head_count, head_size, kv_sequence_length};
     std::array<ck::index_t, array_size> v_gs_os_ns_strides{kv_sequence_length * head_count * 2 * head_size, 2 * head_size, 1, head_count * 2 * head_size};
@@ -352,7 +352,7 @@ __global__ void
 
     const auto a_grid_desc = DeviceOp::MakeAGridDescriptor(q_gs_ms_ks_lengths, q_gs_ms_ks_strides);
     const auto b0_grid_desc =
-        DeviceOp::MakeB0GridDescriptor(k_gs_ms_ks_lengths, k_gs_ms_ks_strides);
+        DeviceOp::MakeB0GridDescriptor(k_gs_ns_ks_lengths, k_gs_ns_ks_strides);
     const auto b1_grid_desc =
         DeviceOp::MakeB1GridDescriptor(v_gs_os_ns_lengths, v_gs_os_ns_strides);
     const auto c_grid_desc_m_n =
@@ -364,7 +364,7 @@ __global__ void
     const auto a_grid_desc_g_m_k =
                   DeviceOp::Transform::MakeAGridDescriptor_G_M_K(q_gs_ms_ks_lengths, q_gs_ms_ks_strides);
     const auto b0_grid_desc_g_l_k = 
-                  DeviceOp::Transform::MakeB0GridDescriptor_G_N_K(k_gs_ms_ks_lengths, k_gs_ms_ks_strides);
+                  DeviceOp::Transform::MakeB0GridDescriptor_G_N_K(k_gs_ns_ks_lengths, k_gs_ns_ks_strides);
     const auto b1_grid_desc_g_n_l = 
                   DeviceOp::Transform::MakeB1GridDescriptor_G_N_K(v_gs_os_ns_lengths, v_gs_os_ns_strides);
     const auto c_grid_desc_g_m_n =
