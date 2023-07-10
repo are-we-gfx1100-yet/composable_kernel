@@ -24,11 +24,14 @@ namespace ck {
 // Gemm1: Acc [M x L] x B1 [L x N] = C [M x N]
 template <typename ADataType,
           typename B0DataType,
+          typename ZDataType,
+          typename FloatGemm,
           typename Acc0DataType,
           typename B1DataType,
           typename Acc1DataType,
           typename CShuffleDataType,
           typename CDataType,
+          typename FloatLSE,
           typename AElementwiseOperation,
           typename B0ElementwiseOperation,
           typename AccElementwiseOperation,
@@ -39,6 +42,8 @@ template <typename ADataType,
           typename B0GridDesc,
           typename B1GridDesc,
           typename CGridDesc_M_N,
+          typename ZGridDesc_M_N,
+          typename LSEGridDesc_M,
           index_t MPerBlock,
           index_t LPerBlock,
           index_t KPerBlock,
@@ -87,10 +92,11 @@ template <typename ADataType,
           index_t CShuffleBlockTransferScalarPerVector_NPerBlock,
           bool PadN,
           bool MaskOutUpperTriangle,
+          bool Deterministic,
           index_t NumGemmKPrefetchStage = 1,
           LoopScheduler LoopSched       = make_default_loop_scheduler(),
           PipelineVersion PipelineVer   = PipelineVersion::v1>
-struct GridwiseBatchedGemmSoftmaxGemm_Wmma
+struct GridwiseBatchedMultiheadAttentionForward_Wmma_CShuffle
 {
     static constexpr auto I0 = Number<0>{};
     static constexpr auto I1 = Number<1>{};
@@ -100,6 +106,8 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
     static constexpr auto I5 = Number<5>{};
     static constexpr auto I6 = Number<6>{};
     static constexpr auto I7 = Number<7>{};
+
+    static constexpr auto WaveSize = 32;
 
     static constexpr auto AK1 = Number<AK1Value>{};
     static constexpr auto BK0 = Number<KPerBlock / BK1Value>{};
@@ -125,6 +133,8 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
                                                               LoopSched,
                                                               AEnableLds,
                                                               B0EnableLds>())>;
+
+    // TODO: C desc for source in blockwise copy?
 
     __host__ __device__ static constexpr auto MakeABlockDescriptor()
     {
@@ -481,10 +491,12 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
     __host__ __device__ static constexpr index_t GetSharedMemoryNumberOfByte()
     {
         // LDS allocation for A and B: be careful of alignment
+        // TODO: sizeof(FloatGemm)?
         const index_t gemm0_bytes_end =
             (SharedMemTrait::a_block_space_size_aligned * sizeof(ADataType) +
              SharedMemTrait::b0_block_space_size_aligned * sizeof(B0DataType));
 
+        // TODO: sizeof(FloatGemm)?
         const index_t gemm1_bytes_end =
             (SharedMemTrait::b1_block_space_offset +
              SharedMemTrait::b1_block_space_size_aligned * sizeof(B1DataType));
@@ -560,6 +572,8 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
         const auto L = GetB0ProblemsizeLK()(I0);
         const auto K = GetAProblemsizeMK()[I1];
         const auto N = GetB1ProblemsizeNL()(I0);
+
+        // TODO: if(Gemm1N != K)?
 
         if(!(M == c_grid_desc_m_n.GetLength(I0) && N == c_grid_desc_m_n.GetLength(I1)))
         {
@@ -645,6 +659,8 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
         return c_grid_desc_mblock_mperblock_nblock_nperblock;
     }
 
+    // TODO: MakeLSEGridDescriptor_MBlock_MRepeat_NWave_MPerXdl?
+
     // return block_id to C matrix tile idx (m0, n0) mapping
     __host__ __device__ static constexpr auto MakeDefaultBlock2CTileMap(
         const CGridDesc_M_N& c_grid_desc_m_n, index_t /* M01 */, index_t /* N01 */)
@@ -657,6 +673,8 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
         MakeCGridDescriptor_MBlock_MPerBlock_NBlock_NPerBlock(CGridDesc_M_N{}))>;
     using DefaultBlock2CTileMap =
         remove_cvref_t<decltype(MakeDefaultBlock2CTileMap(CGridDesc_M_N{}, 1, 1))>;
+
+    // TODO: ZGridDescriptor_M0_N0_M1_N1_M2_N2_M3_N3_N4_N5?
 
     struct SharedMemTrait
     {
@@ -694,25 +712,37 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
     };
 
     template <bool HasMainKBlockLoop,
+              bool IsDropout,
+              bool IsLseStoring,
               typename C0MatrixMask,
               typename Block2CTileMap = DefaultBlock2CTileMap>
     __device__ static void Run(const ADataType* __restrict__ p_a_grid,
                                const B0DataType* __restrict__ p_b0_grid,
                                const B1DataType* __restrict__ p_b1_grid,
                                CDataType* __restrict__ p_c_grid,
+                               ZDataType* __restrict__ p_z_grid,
+                               FloatLSE* __restrict__ p_lse_grid,
                                void* __restrict__ p_shared,
                                const AGridDesc& a_grid_desc,
                                const B0GridDesc& b0_grid_desc,
                                const B1GridDesc& b1_grid_desc,
                                const CGridDescriptor_MBlock_MPerBlock_NBlock_NPerBlock&
                                    c_grid_desc_mblock_mperblock_nblock_nperblock,
+                               const ZGridDescriptor_M0_N0_M1_N1_M2_N2_M3_N3_N4_N5&
+                                   z_grid_desc_m0_n0_m1_n1_m2_n2_m3_n3_n4_n5,
+                               const LSEGridDesc_M& lse_grid_desc_m,
                                const AElementwiseOperation& a_element_op,
                                const B0ElementwiseOperation& b0_element_op,
                                const AccElementwiseOperation& acc_element_op,
                                const B1ElementwiseOperation& b1_element_op,
                                const CElementwiseOperation& c_element_op,
                                const C0MatrixMask& c0_matrix_mask,
-                               const Block2CTileMap& block_2_ctile_map)
+                               const Block2CTileMap& block_2_ctile_map,
+                               const C0MatrixMask& c0_matrix_mask,
+                               const ushort p_dropout_in_16bits,
+                               FloatGemmAcc p_dropout_rescale,
+                               ck::philox& ph,
+                               const index_t block_idx_m)
     {
         // clang-format off
 /*******************************************************************************/
@@ -725,6 +755,8 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
             p_b1_grid, b1_grid_desc.GetElementSpaceSize());
         auto c_grid_buf = make_dynamic_buffer<AddressSpaceEnum::Global>(
             p_c_grid, c_grid_desc_mblock_mperblock_nblock_nperblock.GetElementSpaceSize());
+        auto lse_grid_buf = make_dynamic_buffer<AddressSpaceEnum::Global>(
+            p_lse_grid, lse_grid_desc_m.GetElementSpaceSize());
 
 /*******************************************************************************/
 // BlockIdx.x -> [BlockId.m, BlockId.n]
@@ -735,8 +767,10 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
                           c_grid_desc_mblock_mperblock_nblock_nperblock.GetLength(I2))))
         { return; }
 
+        const index_t block_work_idx_m = Deterministic ? block_idx_m : block_work_idx[I0];
+
         // Store BlockId into SGPR
-        const index_t m_block_data_idx_on_grid = __builtin_amdgcn_readfirstlane(block_work_idx[I0] * MPerBlock);
+        const index_t m_block_data_idx_on_grid = __builtin_amdgcn_readfirstlane(block_work_idx_m * MPerBlock);
         const index_t n_block_data_idx_on_grid = __builtin_amdgcn_readfirstlane(block_work_idx[I1] * NPerBlock);
 
 /*******************************************************************************/
@@ -753,6 +787,7 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
             if constexpr(AEnableLds)
             {
                 constexpr auto AK0PerBlock = KPerBlock/ AK1;
+                // TODO: static_cast<FloatGemm*>?
                 auto a_block_buf = make_dynamic_buffer<AddressSpaceEnum::Lds>(
                     static_cast<ADataType*>(p_shared) + SharedMemTrait::a_block_space_offset, 
                     SharedMemTrait::a_block_space_size_aligned);
@@ -766,7 +801,7 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
 /* typename ThreadClusterLengths,                 */     ABlockTransferThreadClusterLengths_K0_M_K1,
 /* typename ThreadClusterArrangeOrder,            */     ABlockTransferThreadClusterArrangeOrder,
 /* typename SrcData,                              */     ADataType,
-/* typename DstData,                              */     ADataType,
+/* typename DstData,                              */     ADataType, // TODO: FloatGemm?
 /* typename SrcDesc,                              */     decltype(a_grid_desc),
 /* typename DstDesc,                              */     decltype(a_block_desc),
 /* typename SrcDimAccessOrder,                    */     ABlockTransferSrcAccessOrder,
@@ -801,7 +836,7 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
                 // Limitation: NumDim of Src and Dst descriptor should be identical
                 auto a_blockwise_copy =
                     ThreadwiseTensorSliceTransfer_v2<ADataType,
-                                                     ADataType,
+                                                     ADataType, // TODO: FloatGemm?
                                                      decltype(a_grid_desc),
                                                      decltype(a_block_desc),
                                                      Sequence<Number<KWmmaPerBlock>{},
@@ -832,6 +867,7 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
         auto b0_block_trait = [&](){
             if constexpr(B0EnableLds)
             {
+                // TODO: static_cast<FloatGemm*>?
                 auto b0_block_buf = make_dynamic_buffer<AddressSpaceEnum::Lds>(
                     static_cast<B0DataType*>(p_shared) + SharedMemTrait::b0_block_space_offset, 
                     SharedMemTrait::b0_block_space_size_aligned);
@@ -845,7 +881,7 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
                                                 B0BlockTransferThreadClusterLengths_K0_L_K1,
                                                 B0BlockTransferThreadClusterArrangeOrder,
                                                 B0DataType,
-                                                B0DataType,
+                                                B0DataType, // TODO: FloatGemm?
                                                 decltype(b0_grid_desc),
                                                 decltype(b0_block_desc),
                                                 B0BlockTransferSrcAccessOrder,
@@ -880,7 +916,7 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
                 // Limitation: NumDim of Src and Dst descriptor should be identical
                 auto b0_blockwise_copy =
                     ThreadwiseTensorSliceTransfer_v2<B0DataType,
-                                                     B0DataType,
+                                                     B0DataType, // TODO: FloatGemm?
                                                      decltype(b0_grid_desc),
                                                      decltype(b0_block_desc),
                                                      Sequence<Number<KWmmaPerBlock>{},
@@ -921,7 +957,7 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
         auto blockwise_gemm0 = BlockwiseGemmWMMA<
             BlockSize,
             ADataType,
-            B0DataType,
+            B0DataType, // TODO: FloatGemm?
             Acc0DataType,
             decltype(MakeAWaveDescriptor(a_block_desc)),
             decltype(MakeB0WaveDescriptor(b0_block_desc)),
@@ -1039,6 +1075,9 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
                                                   decltype(thread_cluster_desc_m_l),
                                                   decltype(thread_slice_desc_m_l)>{};
         
+        auto blockwise_dropout = BlockwiseDropout<FloatGemmAcc, decltype(thread_slice_desc_m_n)>{
+            p_dropout_in_16bits, p_dropout_rescale};
+
         // Initialize running sum and max of exponentiating row vectors
         using SoftmaxBuf = typename decltype(blockwise_softmax)::BufferType;
         SoftmaxBuf running_sum, running_sum_new, running_max, running_max_new;
@@ -1046,11 +1085,14 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
         running_sum_new = 0;
         running_max     = NumericLimits<Acc0DataType>::Lowest();
         running_max_new = NumericLimits<Acc0DataType>::Lowest();
+
+        // TODO: lse_grid_desc_mblock_mrepeat_mwave_mperxdl?
 /*******************************************************************************/
 // set up Gemm1
 /*******************************************************************************/
         // Acc0 thread buffer -> A1 thread buffer -> blockwise gemm
         // A1 matrix in VGPR
+        // TODO: AccM2?
         constexpr auto A1ThreadSlice_L0PerBlock_MPerBlock_L1 = make_tuple(
             Number<AL0 * AL1 / laccvgprs>{}, 
             Number<mrepeat * mwave * mthreadpersubgroup>{}, 
@@ -1067,7 +1109,7 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
         // A1 matrix blockwise copy
         auto a1_blockwise_copy = ThreadwiseTensorSliceTransfer_StaticToStatic<
             Acc0DataType,
-            ADataType,
+            ADataType, // TODO: FloatGemm?
             decltype(acc0_thread_desc_l0perblock_mperblock_l1),
             decltype(a1_thread_desc_l0perblock_mperblock_l1),
             tensor_operation::element_wise::PassThrough,
@@ -1076,6 +1118,7 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
             2,
             laccvgprs>{tensor_operation::element_wise::PassThrough{}};
    
+        // TODO: FloatGemm?
         auto a1_thread_buf = make_static_buffer<AddressSpaceEnum::Vgpr, ADataType>(
             a1_thread_desc_l0perblock_mperblock_l1.GetElementSpaceSize());       
             
@@ -1084,6 +1127,7 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
         auto b1_block_trait = [&](){
             if constexpr(B1EnableLds)
             {
+                // TODO: FloatGemm?
                 auto b1_block_buf = make_dynamic_buffer<AddressSpaceEnum::Lds>(
                     static_cast<B1DataType*>(p_shared) + SharedMemTrait::b1_block_space_offset, 
                     SharedMemTrait::b1_block_space_size_aligned);
@@ -1097,7 +1141,7 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
 /* typename ThreadClusterLengths,                 */ B1BlockTransferThreadClusterLengths_L0_N_L1,
 /* typename ThreadClusterArrangeOrder,            */ B1BlockTransferThreadClusterArrangeOrder,
 /* typename SrcData,                              */ B1DataType,
-/* typename DstData,                              */ B1DataType,
+/* typename DstData,                              */ B1DataType, // FloatGemm?
 /* typename SrcDesc,                              */ decltype(b1_grid_desc),
 /* typename DstDesc,                              */ decltype(b1_block_desc),
 /* typename SrcDimAccessOrder,                    */ B1BlockTransferSrcAccessOrder,
@@ -1168,7 +1212,7 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
         auto blockwise_gemm1 =
             BlockwiseGemmWMMA<BlockSize,
                               ADataType,
-                              B1DataType,
+                              B1DataType, // TODO: FloatGemm?
                               Acc1DataType,
                               decltype(MakeA1WaveDescriptor_L0_M0_M1_M2_L1(a1_thread_desc_l0perblock_mperblock_l1)),
                               decltype(MakeB1WaveDescriptor(b1_block_desc)),
@@ -1209,6 +1253,9 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
         // Flash Attention
         // Dao, Tri, et al. "Flashattention: Fast and memory-efficient exact attention with io-awareness." arXiv preprint arXiv:2205.14135 (2022).
         index_t gemm1_l_block_outer_index = 0;
+
+        // TODO: z_thread_desc_m0_n0_m1_n1_m2_n2_m3_n3_n4_n5?
+
         // Outer loop, along GEMM_L
         // Inner loop, along GEMM_K
         do{
@@ -1299,6 +1346,8 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
             SoftmaxBuf& sum = blockwise_softmax.sum_value_buf;
 
             blockwise_softmax.Run(acc0_thread_buf, workspace_buf);
+
+            // TODO: if constexpr(IsDropout)?
             
             // TODO: may convert to log domain
             running_max_new = mathext::max(max, running_max);
@@ -1370,6 +1419,8 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
                 }
             } // end gemm1
 
+            // TODO: workaround compiler issue; see ck/ck.hpp?
+
             constexpr auto c_thread_desc_mrepeat_mwave_mthreadpersubgroup_nrepeat_nwave_nsubgroup_naccvgprs =
                 blockwise_gemm1.GetCThreadDescriptor_MRepeat_MWave_MThreadPerSubGroup_NRepeat_NWave_NSubGroup_NAccVgprs();
             constexpr auto c_mrepeat            = c_thread_desc_mrepeat_mwave_mthreadpersubgroup_nrepeat_nwave_nsubgroup_naccvgprs.GetLength(I0);
@@ -1411,6 +1462,8 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
 
             block_sync_lds(); // wait for gemm1 LDS read
         }while(++gemm1_l_block_outer_index < num_gemm1_l_block_outer_loop);
+
+        // TODO: Calculate max + ln(sum) and write out
 /*******************************************************************************/
         // write out to C, implement shuffle
         {
@@ -1531,7 +1584,7 @@ struct GridwiseBatchedGemmSoftmaxGemm_Wmma
                 {c_shuffle_block_desc_mshrepeat_mpershrepeat_nshrepeat_npershrepeat,
                  make_multi_index(0, 0, 0, 0),
                  c_grid_desc_mblock_mperblock_nblock_nperblock,
-                 make_multi_index(block_work_idx[I0], 0, block_work_idx[I1], 0),
+                 make_multi_index(block_work_idx_m, 0, block_work_idx[I1], 0),
                  c_element_op};
 
             // space filling curve for local reg & global memory
