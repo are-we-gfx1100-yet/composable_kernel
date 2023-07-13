@@ -13,7 +13,7 @@
 #include "ck/utility/common_header.hpp"
 #include "ck/tensor_description/tensor_descriptor.hpp"
 #include "ck/tensor_description/tensor_descriptor_helper.hpp"
-#include "ck/tensor_operation/gpu/device/device_batched_gemm_softmax_gemm_permute.hpp"
+#include "ck/tensor_operation/gpu/device/device_grouped_gemm_softmax_gemm_permute.hpp"
 #include "ck/tensor_operation/gpu/device/gemm_specialization.hpp"
 #include "ck/tensor_operation/gpu/device/matrix_padder.hpp"
 #include "ck/tensor_operation/gpu/device/tensor_layout.hpp"
@@ -27,7 +27,7 @@ namespace tensor_operation {
 namespace device {
 
 template <typename DeviceOp,
-          typename GridwiseOp,
+          typename GridwiseGemm,
         //   typename ADataType,
         //   typename B0DataType,
         //   typename B1DataType,
@@ -60,7 +60,7 @@ __global__ void
                                                        const void CK_CONSTANT_ADDRESS_SPACE* group_kernel_args,
                                                        const index_t group_count,
                                                        const AElementwiseOperation a_element_op,
-                                                       const BElementwiseOperation b_element_op,
+                                                       const B0ElementwiseOperation b_element_op,
                                                        const AccElementwiseOperation acc_element_op,
                                                        const B1ElementwiseOperation b1_element_op,
                                                        const CElementwiseOperation c_element_op
@@ -112,8 +112,8 @@ __global__ void
     // const auto c_grid_desc_m_n =
     //               DeviceOp::Transform::MakeCGridDescriptor_M_N(c_gs_ms_os_lengths, c_gs_ms_os_strides);
     // const auto c_grid_desc_mblock_mperblock_nblock_nperblock = 
-    //               GridwiseOp::MakeCGridDescriptor_MBlock_MPerBlock_NBlock_NPerBlock(c_grid_desc_m_n);
-    // const auto block_2_ctile_map = GridwiseOp::MakeDefaultBlock2CTileMap(c_grid_desc_m_n, 1, 1);
+    //               GridwiseGemm::MakeCGridDescriptor_MBlock_MPerBlock_NBlock_NPerBlock(c_grid_desc_m_n);
+    // const auto block_2_ctile_map = GridwiseGemm::MakeDefaultBlock2CTileMap(c_grid_desc_m_n, 1, 1);
 
     // const auto a_grid_desc_g_m_k =
     //               DeviceOp::Transform::MakeAGridDescriptor_G_M_K(a_gs_ms_ks_lengths, a_gs_ms_ks_strides);
@@ -129,7 +129,7 @@ __global__ void
     // const auto c0_matrix_mask = typename DeviceOp::C0MatrixMask{b0_grid_desc_g_l_k.GetLength(Number<1>{})};
 
     // // clang-format on
-    // __shared__ char p_shared[GridwiseOp::GetSharedMemoryNumberOfByte()];
+    // __shared__ char p_shared[GridwiseGemm::GetSharedMemoryNumberOfByte()];
     // const index_t num_blocks_per_batch =
     //     __builtin_amdgcn_readfirstlane(get_grid_size() / batch_count);
     // const index_t g_idx = __builtin_amdgcn_readfirstlane(get_block_1d_id() / num_blocks_per_batch);
@@ -151,7 +151,7 @@ __global__ void
 
 
 
-    // GridwiseOp::template Run<HasMainKBlockLoop>(p_a_grid + a_batch_offset,
+    // GridwiseGemm::template Run<HasMainKBlockLoop>(p_a_grid + a_batch_offset,
     //                                             p_b0_grid + b0_batch_offset,
     //                                             p_b1_grid + b1_batch_offset,
     //                                             p_c_grid + c_batch_offset,
@@ -170,6 +170,8 @@ __global__ void
 
 
     // grouped
+
+    __shared__ char p_shared[GridwiseGemm::GetSharedMemoryNumberOfByte()];
 
     const index_t block_id = get_block_1d_id();
 
@@ -194,10 +196,15 @@ __global__ void
         group_id = index_t((left + right) / 2);
     }
 
+    // per-group batch offset
+    const index_t num_blocks_per_batch = arg_ptr[group_id].num_blocks_per_batch_;
+    const index_t g_idx                = __builtin_amdgcn_readfirstlane(
+        (block_id - arg_ptr[group_id].block_start_) / num_blocks_per_batch);
+
     const long_index_t a_batch_offset = __builtin_amdgcn_readfirstlane(
         static_cast<long_index_t>(arg_ptr[group_id].compute_base_ptr_of_batch_.GetABasePtr(g_idx)));
     const long_index_t b_batch_offset = __builtin_amdgcn_readfirstlane(
-        static_cast<long_index_t>(arg_ptr[group_id].compute_base_ptr_of_batch_.GetBBasePtr(g_idx)));
+        static_cast<long_index_t>(arg_ptr[group_id].compute_base_ptr_of_batch_.GetB0BasePtr(g_idx)));
     const long_index_t b1_batch_offset = __builtin_amdgcn_readfirstlane(static_cast<long_index_t>(
         arg_ptr[group_id].compute_base_ptr_of_batch_.GetB1BasePtr(g_idx)));
     const long_index_t c_batch_offset  = __builtin_amdgcn_readfirstlane(
@@ -209,17 +216,17 @@ __global__ void
         arg_ptr[group_id].p_b1_grid_ + b1_batch_offset,
         arg_ptr[group_id].p_c_grid_ + c_batch_offset,
         p_shared,
+        arg_ptr[group_id].a_grid_desc_ak0_m_ak1_,
+        arg_ptr[group_id].b_grid_desc_bk0_n_bk1_,
+        arg_ptr[group_id].b1_grid_desc_bk0_n_bk1_,
+        arg_ptr[group_id].c_grid_desc_mblock_mperblock_nblock_nperblock_,
         a_element_op,
         b_element_op,
         acc_element_op,
         b1_element_op,
         c_element_op,
-        arg_ptr[group_id].a_grid_desc_ak0_m_ak1_,
-        arg_ptr[group_id].b_grid_desc_bk0_n_bk1_,
-        arg_ptr[group_id].b1_grid_desc_bk0_n_bk1_,
-        arg_ptr[group_id].c_grid_desc_mblock_mperblock_nblock_nperblock_,
-        arg_ptr[group_id].block_2_ctile_map_,
-        arg_ptr[group_id].c0_matrix_mask_);
+        arg_ptr[group_id].c0_matrix_mask_,
+        arg_ptr[group_id].block_2_ctile_map_);
 
 #else
     // ignore = p_a_grid;
@@ -354,17 +361,17 @@ struct DeviceGroupedGemmSoftmaxGemmPermute_Wmma_CShuffle
     using DeviceOp = DeviceGroupedGemmSoftmaxGemmPermute_Wmma_CShuffle;
     using ProblemDesc = typename DeviceGroupedGemmSoftmaxGemmPermute<NumDimG,
                                                                      NumDimM,
-                                                                     NumDimN,
+                                                                     NumDimL,
                                                                      NumDimK,
-                                                                     NumDimO,
+                                                                     NumDimN,
                                                                      ADataType,
-                                                                     BDataType,
+                                                                     B0DataType,
                                                                      B1DataType,
                                                                      CDataType,
                                                                      Acc0BiasDataType,
                                                                      Acc1BiasDataType,
                                                                      AElementwiseOperation,
-                                                                     BElementwiseOperation,
+                                                                     B0ElementwiseOperation,
                                                                      AccElementwiseOperation,
                                                                      B1ElementwiseOperation,
                                                                      CElementwiseOperation,
@@ -541,8 +548,8 @@ struct DeviceGroupedGemmSoftmaxGemmPermute_Wmma_CShuffle
         CGridDesc_G_M_N c_grid_desc_g_m_n_;
     };
 
-    // GridwiseOp
-    using GridwiseOp = GridwiseBatchedGemmSoftmaxGemm_Wmma<
+    // GridwiseGemm
+    using GridwiseGemm = GridwiseBatchedGemmSoftmaxGemm_Wmma<
         // DataType Family
         ADataType,
         B0DataType,
@@ -753,13 +760,13 @@ struct DeviceGroupedGemmSoftmaxGemmPermute_Wmma_CShuffle
 //         const auto c_grid_desc_m_n =
 //             DeviceOp::Transform::MakeCGridDescriptor_M_N(c_gs_ms_os_lengths, c_gs_ms_os_strides);
 
-//         const auto block_2_ctile_map = GridwiseOp::MakeDefaultBlock2CTileMap(c_grid_desc_m_n, 1, 1);
+//         const auto block_2_ctile_map = GridwiseGemm::MakeDefaultBlock2CTileMap(c_grid_desc_m_n, 1, 1);
 
 //         const auto c_grid_desc_g_m_n =
 //             DeviceOp::Transform::MakeCGridDescriptor_G_M_N(c_gs_ms_os_lengths, c_gs_ms_os_strides);
 //         index_t batch_count = c_grid_desc_g_m_n.GetLength(Number<0>{});
 
-//         if(!GridwiseOp::CheckValidity(
+//         if(!GridwiseGemm::CheckValidity(
 //                a_grid_desc, b0_grid_desc, b1_grid_desc, c_grid_desc_m_n, block_2_ctile_map))
 //         {
 //             return false;
@@ -884,7 +891,7 @@ struct DeviceGroupedGemmSoftmaxGemmPermute_Wmma_CShuffle
 //               c_grid_desc_g_m_n_{
 //                   Transform::MakeCGridDescriptor_G_M_N(c_gs_ms_ns_lengths, c_gs_ms_ns_strides)},
 //               c_grid_desc_mblock_mperblock_nblock_nperblock_{},
-//               block_2_ctile_map_{GridwiseOp::MakeDefaultBlock2CTileMap(c_grid_desc_m_n_, M01, N01)},
+//               block_2_ctile_map_{GridwiseGemm::MakeDefaultBlock2CTileMap(c_grid_desc_m_n_, M01, N01)},
 //               a_element_op_{a_element_op},
 //               b0_element_op_{b0_element_op},
 //               acc_element_op_{acc_element_op},
@@ -915,11 +922,11 @@ struct DeviceGroupedGemmSoftmaxGemmPermute_Wmma_CShuffle
 //             ignore = acc1_biases_gs_ms_ns_lengths;
 //             ignore = acc1_biases_gs_ms_ns_strides;
 
-//             if(GridwiseOp::CheckValidity(
+//             if(GridwiseGemm::CheckValidity(
 //                    a_grid_desc, b0_grid_desc, b1_grid_desc, c_grid_desc_m_n_, block_2_ctile_map_))
 //             {
 //                 c_grid_desc_mblock_mperblock_nblock_nperblock_ =
-//                     GridwiseOp::MakeCGridDescriptor_MBlock_MPerBlock_NBlock_NPerBlock(
+//                     GridwiseGemm::MakeCGridDescriptor_MBlock_MPerBlock_NBlock_NPerBlock(
 //                         c_grid_desc_m_n_);
 //             }
 //         }
@@ -941,11 +948,11 @@ struct DeviceGroupedGemmSoftmaxGemmPermute_Wmma_CShuffle
 //         B1GridDesc_G_N_L b1_grid_desc_g_n_l_;
 //         CGridDesc_G_M_N c_grid_desc_g_m_n_;
 
-//         typename GridwiseOp::CGridDescriptor_MBlock_MPerBlock_NBlock_NPerBlock
+//         typename GridwiseGemm::CGridDescriptor_MBlock_MPerBlock_NBlock_NPerBlock
 //             c_grid_desc_mblock_mperblock_nblock_nperblock_;
 
 //         // Block to Tile mapping
-//         typename GridwiseOp::DefaultBlock2CTileMap block_2_ctile_map_;
+//         typename GridwiseGemm::DefaultBlock2CTileMap block_2_ctile_map_;
 
 //         // ElementwiseOp
 //         AElementwiseOperation a_element_op_;
@@ -981,11 +988,11 @@ struct DeviceGroupedGemmSoftmaxGemmPermute_Wmma_CShuffle
 
 //             const index_t grid_size = arg.G0_ * arg.G1_ * M0 * N0;
 //             const auto K            = arg.K_;
-//             // printf("HasKBlockLoop: %d\n", GridwiseOp::CalculateHasMainKBlockLoop(K));
+//             // printf("HasKBlockLoop: %d\n", GridwiseGemm::CalculateHasMainKBlockLoop(K));
 //             auto launch_kernel = [&](auto has_main_k_block_loop) {
 //                 const auto kernel =
 //                     kernel_grouped_gemm_softmax_gemm_wmma_cshuffle<DeviceOp,
-//                                                                    GridwiseOp,
+//                                                                    GridwiseGemm,
 //                                                                    ADataType,
 //                                                                    B0DataType,
 //                                                                    B1DataType,
@@ -1017,7 +1024,7 @@ struct DeviceGroupedGemmSoftmaxGemmPermute_Wmma_CShuffle
 //                                               arg.output_permute_);
 //             };
 
-//             if(GridwiseOp::CalculateHasMainKBlockLoop(K))
+//             if(GridwiseGemm::CalculateHasMainKBlockLoop(K))
 //             {
 //                 return launch_kernel(integral_constant<bool, true>{});
 //             }
@@ -1064,7 +1071,7 @@ struct DeviceGroupedGemmSoftmaxGemmPermute_Wmma_CShuffle
 //             return false;
 //         }
 
-//         if(!GridwiseOp::CheckValidity(arg.a_grid_desc,
+//         if(!GridwiseGemm::CheckValidity(arg.a_grid_desc,
 //                                       arg.b0_grid_desc,
 //                                       arg.b1_grid_desc,
 //                                       arg.c_grid_desc_m_n_,
@@ -1341,14 +1348,14 @@ struct DeviceGroupedGemmSoftmaxGemmPermute_Wmma_CShuffle
     {
         // pointers
         const ADataType* p_a_grid_;
-        const BDataType* p_b_grid_;
+        const B0DataType* p_b_grid_;
         const B1DataType* p_b1_grid_;
         CDataType* p_c_grid_;
 
         // tensor descriptors for block/thread-wise copy
-        AGridDesc_AK0_M_AK1 a_grid_desc_ak0_m_ak1_;
-        BGridDesc_BK0_N_BK1 b_grid_desc_bk0_n_bk1_;
-        B1GridDesc_BK0_N_BK1 b1_grid_desc_bk0_n_bk1_;
+        AGridDesc a_grid_desc_ak0_m_ak1_;
+        B0GridDesc b_grid_desc_bk0_n_bk1_;
+        B1GridDesc b1_grid_desc_bk0_n_bk1_;
         typename GridwiseGemm::CGridDescriptor_MBlock_MPerBlock_NBlock_NPerBlock
             c_grid_desc_mblock_mperblock_nblock_nperblock_;
 
@@ -1392,7 +1399,7 @@ struct DeviceGroupedGemmSoftmaxGemmPermute_Wmma_CShuffle
                  std::vector<std::vector<const void*>> p_acc1_biases_vec,
                  std::vector<ProblemDesc> problem_desc_vec,
                  AElementwiseOperation a_element_op,
-                 BElementwiseOperation b_element_op,
+                 B0ElementwiseOperation b_element_op,
                  AccElementwiseOperation acc_element_op,
                  B1ElementwiseOperation b1_element_op,
                  CElementwiseOperation c_element_op)
@@ -1421,29 +1428,90 @@ struct DeviceGroupedGemmSoftmaxGemmPermute_Wmma_CShuffle
             for(std::size_t i = 0; i < group_count_; i++)
             {
                 const auto p_a_grid  = static_cast<const ADataType*>(p_a_vec[i]);
-                const auto p_b_grid  = static_cast<const BDataType*>(p_b_vec[i]);
+                const auto p_b_grid  = static_cast<const B0DataType*>(p_b_vec[i]);
                 const auto p_b1_grid = static_cast<const B1DataType*>(p_b1_vec[i]);
                 const auto p_c_grid  = static_cast<CDataType*>(p_c_vec[i]);
 
                 const auto& problem_desc = problem_desc_vec[i];
 
-                const auto a_grid_desc_ak0_m_ak1 = MakeAGridDescriptor_AK0_M_AK1(
-                    problem_desc.a_gs_ms_ks_lengths, problem_desc.a_gs_ms_ks_strides);
-                const auto b_grid_desc_bk0_n_bk1 = MakeBGridDescriptor_BK0_N_BK1(
-                    problem_desc.b0_gs_ns_ks_lengths, problem_desc.b0_gs_ns_ks_strides);
-                const auto b1_grid_desc_bk0_n_bk1 = MakeB1GridDescriptor_BK0_N_BK1(
-                    problem_desc.b1_gs_os_ns_lengths, problem_desc.b1_gs_os_ns_strides);
+                // copied code to transform vector to sized array
+
+                std::array<index_t, NumDimG + NumDimM + NumDimN> a_lengths;
+                std::array<index_t, NumDimG + NumDimM + NumDimN> a_strides;
+                std::array<index_t, NumDimG + NumDimM + NumDimN> b0_lengths;
+                std::array<index_t, NumDimG + NumDimM + NumDimN> b0_strides;
+                std::array<index_t, NumDimG + NumDimM + NumDimN> b1_lengths;
+                std::array<index_t, NumDimG + NumDimM + NumDimN> b1_strides;
+                std::array<index_t, NumDimG + NumDimM + NumDimN> c_lengths;
+                std::array<index_t, NumDimG + NumDimM + NumDimN> c_strides;
+                std::transform(problem_desc.a_gs_ms_ks_lengths.begin(),
+                            problem_desc.a_gs_ms_ks_lengths.end(),
+                            a_lengths.begin(),
+                            [](index_t i) { return i; });
+                std::transform(problem_desc.a_gs_ms_ks_strides.begin(),
+                            problem_desc.a_gs_ms_ks_strides.end(),
+                            a_strides.begin(),
+                            [](index_t i) { return i; });
+                std::transform(problem_desc.b0_gs_ns_ks_lengths.begin(),
+                            problem_desc.b0_gs_ns_ks_lengths.end(),
+                            b0_lengths.begin(),
+                            [](index_t i) { return i; });
+                std::transform(problem_desc.b0_gs_ns_ks_strides.begin(),
+                            problem_desc.b0_gs_ns_ks_strides.end(),
+                            b0_strides.begin(),
+                            [](index_t i) { return i; });
+                std::transform(problem_desc.b1_gs_os_ns_lengths.begin(),
+                            problem_desc.b1_gs_os_ns_lengths.end(),
+                            b1_lengths.begin(),
+                            [](index_t i) { return i; });
+                std::transform(problem_desc.b1_gs_os_ns_strides.begin(),
+                            problem_desc.b1_gs_os_ns_strides.end(),
+                            b1_strides.begin(),
+                            [](index_t i) { return i; });
+                std::transform(problem_desc.c_gs_ms_os_lengths.begin(),
+                            problem_desc.c_gs_ms_os_lengths.end(),
+                            c_lengths.begin(),
+                            [](index_t i) { return i; });
+                std::transform(problem_desc.c_gs_ms_os_strides.begin(),
+                            problem_desc.c_gs_ms_os_strides.end(),
+                            c_strides.begin(),
+                            [](index_t i) { return i; });
+
+                // const auto a_grid_desc_ak0_m_ak1 = MakeAGridDescriptor(
+                //     problem_desc.a_gs_ms_ks_lengths, problem_desc.a_gs_ms_ks_strides);
+                // const auto b_grid_desc_bk0_n_bk1 = MakeB0GridDescriptor(
+                //     problem_desc.b0_gs_ns_ks_lengths, problem_desc.b0_gs_ns_ks_strides);
+                // const auto b1_grid_desc_bk0_n_bk1 = MakeB1GridDescriptor(
+                //     problem_desc.b1_gs_os_ns_lengths, problem_desc.b1_gs_os_ns_strides);
+                // const auto c_grid_desc_m_n = Transform::MakeCGridDescriptor_M_N(
+                //     problem_desc.c_gs_ms_os_lengths, problem_desc.c_gs_ms_os_strides);
+
+                // const auto a_grid_desc_g_m_k = Transform::MakeAGridDescriptor_G_M_K(
+                //     problem_desc.a_gs_ms_ks_lengths, problem_desc.a_gs_ms_ks_strides);
+                // const auto b_grid_desc_g_n_k = Transform::MakeB0GridDescriptor_G_N_K(
+                //     problem_desc.b0_gs_ns_ks_lengths, problem_desc.b0_gs_ns_ks_strides);
+                // const auto b1_grid_desc_g_n_k = Transform::MakeB1GridDescriptor_G_N_K(
+                //     problem_desc.b1_gs_os_ns_lengths, problem_desc.b1_gs_os_ns_strides);
+                // const auto c_grid_desc_g_m_n = Transform::MakeCGridDescriptor_G_M_N(
+                //     problem_desc.c_gs_ms_os_lengths, problem_desc.c_gs_ms_os_strides);
+
+                const auto a_grid_desc_ak0_m_ak1 = MakeAGridDescriptor(
+                    a_lengths, a_strides);
+                const auto b_grid_desc_bk0_n_bk1 = MakeB0GridDescriptor(
+                    b0_lengths, b0_strides);
+                const auto b1_grid_desc_bk0_n_bk1 = MakeB1GridDescriptor(
+                    b1_lengths, b1_strides);
                 const auto c_grid_desc_m_n = Transform::MakeCGridDescriptor_M_N(
-                    problem_desc.c_gs_ms_os_lengths, problem_desc.c_gs_ms_os_strides);
+                    c_lengths, c_strides);
 
                 const auto a_grid_desc_g_m_k = Transform::MakeAGridDescriptor_G_M_K(
-                    problem_desc.a_gs_ms_ks_lengths, problem_desc.a_gs_ms_ks_strides);
+                    a_lengths, a_strides);
                 const auto b_grid_desc_g_n_k = Transform::MakeB0GridDescriptor_G_N_K(
-                    problem_desc.b0_gs_ns_ks_lengths, problem_desc.b0_gs_ns_ks_strides);
+                    b0_lengths, b0_strides);
                 const auto b1_grid_desc_g_n_k = Transform::MakeB1GridDescriptor_G_N_K(
-                    problem_desc.b1_gs_os_ns_lengths, problem_desc.b1_gs_os_ns_strides);
+                    b1_lengths, b1_strides);
                 const auto c_grid_desc_g_m_n = Transform::MakeCGridDescriptor_G_M_N(
-                    problem_desc.c_gs_ms_os_lengths, problem_desc.c_gs_ms_os_strides);
+                    c_lengths, c_strides);
 
                 const auto c_grid_desc_mblock_mperblock_nblock_nperblock =
                     GridwiseGemm::MakeCGridDescriptor_MBlock_MPerBlock_NBlock_NPerBlock(
@@ -1494,17 +1562,17 @@ struct DeviceGroupedGemmSoftmaxGemmPermute_Wmma_CShuffle
 
                 group_device_args_.push_back(
                     {{problem_desc.a_gs_ms_ks_lengths[NumDimG + NumDimM - 1],
-                      problem_desc.b0_gs_ns_ks_lengths[NumDimG + NumDimN - 1],
-                      problem_desc.b0_gs_ns_ks_lengths[NumDimG + NumDimN + NumDimK - 1],
-                      problem_desc.b1_gs_os_ns_lengths[NumDimG + NumDimO - 1]},
+                      problem_desc.b0_gs_ns_ks_lengths[NumDimG + NumDimL - 1],
+                      problem_desc.b0_gs_ns_ks_lengths[NumDimG + NumDimL + NumDimK - 1],
+                      problem_desc.b1_gs_os_ns_lengths[NumDimG + NumDimN - 1]},
                      {problem_desc.a_gs_ms_ks_strides[NumDimG + NumDimM - 1],
                       problem_desc.a_gs_ms_ks_strides[NumDimG + NumDimM + NumDimK - 1]},
-                     {problem_desc.b0_gs_ns_ks_strides[NumDimG + NumDimN - 1],
-                      problem_desc.b0_gs_ns_ks_strides[NumDimG + NumDimN + NumDimK - 1]},
-                     {problem_desc.b1_gs_os_ns_strides[NumDimG + NumDimO - 1],
-                      problem_desc.b1_gs_os_ns_strides[NumDimG + NumDimO + NumDimN - 1]},
+                     {problem_desc.b0_gs_ns_ks_strides[NumDimG + NumDimL - 1],
+                      problem_desc.b0_gs_ns_ks_strides[NumDimG + NumDimL + NumDimK - 1]},
+                     {problem_desc.b1_gs_os_ns_strides[NumDimG + NumDimN - 1],
+                      problem_desc.b1_gs_os_ns_strides[NumDimG + NumDimN + NumDimL - 1]},
                      {problem_desc.c_gs_ms_os_strides[NumDimG + NumDimM - 1],
-                      problem_desc.c_gs_ms_os_strides[NumDimG + NumDimM + NumDimO - 1]},
+                      problem_desc.c_gs_ms_os_strides[NumDimG + NumDimM + NumDimN - 1]},
                      c_grid_desc_m_n});
             }
         }
@@ -1516,7 +1584,7 @@ struct DeviceGroupedGemmSoftmaxGemmPermute_Wmma_CShuffle
         index_t grid_size_;
 
         AElementwiseOperation a_element_op_;
-        BElementwiseOperation b_element_op_;
+        B0ElementwiseOperation b_element_op_;
         AccElementwiseOperation acc_element_op_;
         B1ElementwiseOperation b1_element_op_;
         CElementwiseOperation c_element_op_;
@@ -1556,10 +1624,11 @@ struct DeviceGroupedGemmSoftmaxGemmPermute_Wmma_CShuffle
 
             auto launch_kernel = [&](auto has_main_k_block_loop_) {
                 const auto kernel =
-                    kernel_grouped_gemm_softmax_gemm_xdl_cshuffle_v1<GridwiseGemm,
+                    kernel_grouped_gemm_softmax_gemm_wmma_cshuffle<DeviceOp,
+                                                                     GridwiseGemm,
                                                                      GroupKernelArg,
                                                                      AElementwiseOperation,
-                                                                     BElementwiseOperation,
+                                                                     B0ElementwiseOperation,
                                                                      AccElementwiseOperation,
                                                                      B1ElementwiseOperation,
                                                                      CElementwiseOperation,
@@ -1617,97 +1686,95 @@ struct DeviceGroupedGemmSoftmaxGemmPermute_Wmma_CShuffle
 
     static bool IsSupportedArgument(const Argument& arg)
     {
-        if(!(ck::get_device_name() == "gfx908" || ck::get_device_name() == "gfx90a" ||
-             ck::get_device_name() == "gfx940" || ck::get_device_name() == "gfx941" ||
-             ck::get_device_name() == "gfx942"))
+        if(!(ck::get_device_name() == "gfx1100"))
         {
             return false;
         }
 
         // TODO ANT: Check if tensor specialization & strides mismatch
 
-        bool all_has_main_k_block_loop  = true;
-        bool some_has_main_k_block_loop = false;
+        // bool all_has_main_k_block_loop  = true;
+        // bool some_has_main_k_block_loop = false;
 
-        for(std::size_t i = 0; i < arg.group_count_; i++)
-        {
-            const auto& kernel_arg = arg.group_kernel_args_[i];
-            const auto& device_arg = arg.group_device_args_[i];
+        // for(std::size_t i = 0; i < arg.group_count_; i++)
+        // {
+        //     const auto& kernel_arg = arg.group_kernel_args_[i];
+        //     const auto& device_arg = arg.group_device_args_[i];
 
-            // Check if C permute dimension matches GEMM + GEMM shape
-            const index_t c_m       = device_arg.c_grid_desc_m_n_.GetLength(I0);
-            const index_t c_gemm1n  = device_arg.c_grid_desc_m_n_.GetLength(I1);
-            const index_t a_m       = kernel_arg.a_grid_desc_ak0_m_ak1_.GetLength(I1);
-            const index_t b1_gemm1n = kernel_arg.b1_grid_desc_bk0_n_bk1_.GetLength(I1);
-            if(!(c_m == a_m && c_gemm1n == b1_gemm1n))
-            {
-                return false;
-            }
+        //     // Check if C permute dimension matches GEMM + GEMM shape
+        //     const index_t c_m       = device_arg.c_grid_desc_m_n_.GetLength(I0);
+        //     const index_t c_gemm1n  = device_arg.c_grid_desc_m_n_.GetLength(I1);
+        //     const index_t a_m       = kernel_arg.a_grid_desc_ak0_m_ak1_.GetLength(I1);
+        //     const index_t b1_gemm1n = kernel_arg.b1_grid_desc_bk0_n_bk1_.GetLength(I1);
+        //     if(!(c_m == a_m && c_gemm1n == b1_gemm1n))
+        //     {
+        //         return false;
+        //     }
 
-            // Check if having main loop
-            const auto K = kernel_arg.a_grid_desc_ak0_m_ak1_.GetLength(I0) *
-                           kernel_arg.a_grid_desc_ak0_m_ak1_.GetLength(I2);
-            const bool y = GridwiseGemm::CalculateHasMainKBlockLoop(K);
-            all_has_main_k_block_loop &= y;
-            some_has_main_k_block_loop |= y;
+        //     // Check if having main loop
+        //     const auto K = kernel_arg.a_grid_desc_ak0_m_ak1_.GetLength(I0) *
+        //                    kernel_arg.a_grid_desc_ak0_m_ak1_.GetLength(I2);
+        //     const bool y = GridwiseGemm::CalculateHasMainKBlockLoop(K);
+        //     all_has_main_k_block_loop &= y;
+        //     some_has_main_k_block_loop |= y;
 
-            // Note: we need raw lengths since threadwise copy can not handle vector load when
-            // part of vector is out of bounds
-            const auto MzRaw      = device_arg.raw_lengths_mz_nz_kz_gemm1nz_[0];
-            const auto NzRaw      = device_arg.raw_lengths_mz_nz_kz_gemm1nz_[1];
-            const auto KzRaw      = device_arg.raw_lengths_mz_nz_kz_gemm1nz_[2];
-            const auto Gemm1NzRaw = device_arg.raw_lengths_mz_nz_kz_gemm1nz_[3];
+        //     // Note: we need raw lengths since threadwise copy can not handle vector load when
+        //     // part of vector is out of bounds
+        //     const auto MzRaw      = device_arg.raw_lengths_mz_nz_kz_gemm1nz_[0];
+        //     const auto NzRaw      = device_arg.raw_lengths_mz_nz_kz_gemm1nz_[1];
+        //     const auto KzRaw      = device_arg.raw_lengths_mz_nz_kz_gemm1nz_[2];
+        //     const auto Gemm1NzRaw = device_arg.raw_lengths_mz_nz_kz_gemm1nz_[3];
 
-            // Check scalar per vector requirement
-            const auto a_extent_lowest  = ABlockTransferSrcVectorDim == 2 ? KzRaw : MzRaw;
-            const auto b_extent_lowest  = BBlockTransferSrcVectorDim == 2 ? KzRaw : NzRaw;
-            const auto b1_extent_lowest = B1BlockTransferSrcVectorDim == 2 ? NzRaw : Gemm1NzRaw;
-            const auto c_extent_lowest  = Gemm1NzRaw;
+        //     // Check scalar per vector requirement
+        //     const auto a_extent_lowest  = ABlockTransferSrcVectorDim == 2 ? KzRaw : MzRaw;
+        //     const auto b_extent_lowest  = BBlockTransferSrcVectorDim == 2 ? KzRaw : NzRaw;
+        //     const auto b1_extent_lowest = B1BlockTransferSrcVectorDim == 2 ? NzRaw : Gemm1NzRaw;
+        //     const auto c_extent_lowest  = Gemm1NzRaw;
 
-            if(!(a_extent_lowest % ABlockTransferSrcScalarPerVector == 0 &&
-                 b_extent_lowest % BBlockTransferSrcScalarPerVector == 0 &&
-                 b1_extent_lowest % B1BlockTransferSrcScalarPerVector == 0 &&
-                 c_extent_lowest % CShuffleBlockTransferScalarPerVector_NPerBlock == 0))
-            {
-                return false;
-            }
+        //     if(!(a_extent_lowest % ABlockTransferSrcScalarPerVector == 0 &&
+        //          b_extent_lowest % BBlockTransferSrcScalarPerVector == 0 &&
+        //          b1_extent_lowest % B1BlockTransferSrcScalarPerVector == 0 &&
+        //          c_extent_lowest % CShuffleBlockTransferScalarPerVector_NPerBlock == 0))
+        //     {
+        //         return false;
+        //     }
 
-            // Check vector load/store requirement
-            const auto a_stride_lowest = ABlockTransferSrcVectorDim == 2
-                                             ? device_arg.a_mz_kz_strides_[1]
-                                             : device_arg.a_mz_kz_strides_[0];
-            const auto b_stride_lowest = BBlockTransferSrcVectorDim == 2
-                                             ? device_arg.b_nz_kz_strides_[1]
-                                             : device_arg.b_nz_kz_strides_[0];
-            const auto b1_stride_lowest = B1BlockTransferSrcVectorDim == 2
-                                              ? device_arg.b1_nz_kz_strides_[1]
-                                              : device_arg.b1_nz_kz_strides_[0];
-            const auto c_stride_lowest =
-                device_arg.c_mz_gemm1nz_strides_[1]; // cshuffle assumes lowest dim in Gemm1Ns to be
-                                                     // contiguous
+        //     // Check vector load/store requirement
+        //     const auto a_stride_lowest = ABlockTransferSrcVectorDim == 2
+        //                                      ? device_arg.a_mz_kz_strides_[1]
+        //                                      : device_arg.a_mz_kz_strides_[0];
+        //     const auto b_stride_lowest = BBlockTransferSrcVectorDim == 2
+        //                                      ? device_arg.b_nz_kz_strides_[1]
+        //                                      : device_arg.b_nz_kz_strides_[0];
+        //     const auto b1_stride_lowest = B1BlockTransferSrcVectorDim == 2
+        //                                       ? device_arg.b1_nz_kz_strides_[1]
+        //                                       : device_arg.b1_nz_kz_strides_[0];
+        //     const auto c_stride_lowest =
+        //         device_arg.c_mz_gemm1nz_strides_[1]; // cshuffle assumes lowest dim in Gemm1Ns to be
+        //                                              // contiguous
 
-            if(!(a_stride_lowest == 1 || b_stride_lowest == 1 || b1_stride_lowest == 1 ||
-                 c_stride_lowest == 1))
-            {
-                return false;
-            }
+        //     if(!(a_stride_lowest == 1 || b_stride_lowest == 1 || b1_stride_lowest == 1 ||
+        //          c_stride_lowest == 1))
+        //     {
+        //         return false;
+        //     }
 
-            if(!GridwiseGemm::CheckValidity(kernel_arg.a_grid_desc_ak0_m_ak1_,
-                                            kernel_arg.b_grid_desc_bk0_n_bk1_,
-                                            kernel_arg.b1_grid_desc_bk0_n_bk1_,
-                                            device_arg.c_grid_desc_m_n_,
-                                            kernel_arg.block_2_ctile_map_))
-            {
-                return false;
-            }
-        }
+        //     if(!GridwiseGemm::CheckValidity(kernel_arg.a_grid_desc_ak0_m_ak1_,
+        //                                     kernel_arg.b_grid_desc_bk0_n_bk1_,
+        //                                     kernel_arg.b1_grid_desc_bk0_n_bk1_,
+        //                                     device_arg.c_grid_desc_m_n_,
+        //                                     kernel_arg.block_2_ctile_map_))
+        //     {
+        //         return false;
+        //     }
+        // }
 
-        // all gemm problems have to simultaneously meet has_main_k_block_loop or
-        // no_main_k_block_loop
-        if(!(all_has_main_k_block_loop || !some_has_main_k_block_loop))
-        {
-            return false;
-        }
+        // // all gemm problems have to simultaneously meet has_main_k_block_loop or
+        // // no_main_k_block_loop
+        // if(!(all_has_main_k_block_loop || !some_has_main_k_block_loop))
+        // {
+        //     return false;
+        // }
 
         return true;
     }
@@ -1726,7 +1793,7 @@ struct DeviceGroupedGemmSoftmaxGemmPermute_Wmma_CShuffle
                              std::vector<std::vector<const void*>> p_acc1_biases_vec,
                              std::vector<ProblemDesc> problem_desc_vec,
                              AElementwiseOperation a_element_op,
-                             BElementwiseOperation b_element_op,
+                             B0ElementwiseOperation b_element_op,
                              AccElementwiseOperation acc_element_op,
                              B1ElementwiseOperation b1_element_op,
                              CElementwiseOperation c_element_op)
@@ -1757,7 +1824,7 @@ struct DeviceGroupedGemmSoftmaxGemmPermute_Wmma_CShuffle
                         std::vector<std::vector<const void*>> p_acc1_biases_vec,
                         std::vector<ProblemDesc> problem_desc_vec,
                         AElementwiseOperation a_element_op,
-                        BElementwiseOperation b_element_op,
+                        B0ElementwiseOperation b_element_op,
                         AccElementwiseOperation acc_element_op,
                         B1ElementwiseOperation b1_element_op,
                         CElementwiseOperation c_element_op) override
