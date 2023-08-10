@@ -134,6 +134,13 @@ struct scalar_type<int8_t>
     static constexpr index_t vector_size = 1;
 };
 
+template <>
+struct scalar_type<uint8_t>
+{
+    using type                           = uint8_t;
+    static constexpr index_t vector_size = 1;
+};
+
 #ifdef CK_EXPERIMENTAL_BIT_INT_EXTENSION_INT4
 template <>
 struct scalar_type<int4_t>
@@ -960,6 +967,14 @@ using f8x16_t = typename vector_type<f8_t, 16>::type;
 using f8x32_t = typename vector_type<f8_t, 32>::type;
 using f8x64_t = typename vector_type<f8_t, 64>::type;
 
+// u8
+// i8
+using uint8x2_t  = typename vector_type<uint8_t, 2>::type;
+using uint8x4_t  = typename vector_type<uint8_t, 4>::type;
+using uint8x8_t  = typename vector_type<uint8_t, 8>::type;
+using uint8x16_t = typename vector_type<uint8_t, 16>::type;
+using uint8x32_t = typename vector_type<uint8_t, 32>::type;
+using uint8x64_t = typename vector_type<uint8_t, 64>::type;
 
 // Convert X to Y
 template <typename Y, typename X>
@@ -1150,6 +1165,16 @@ inline __host__ __device__ constexpr bhalf_t type_convert<bhalf_t, int8_t>(int8_
     float x_fp32 = static_cast<float>(x);
 
     return type_convert<bhalf_t>(x_fp32);
+}
+
+// convert int8 to fp16 via fp32
+template <>
+inline __host__ __device__ constexpr half_t type_convert<half_t, int8_t>(int8_t x)
+{
+    // TODO: replace it with fast_converter
+    float x_fp32 = static_cast<float>(x);
+
+    return type_convert<half_t>(x_fp32);
 }
 
 // Declare a template function for bf16 conversion using RTN
